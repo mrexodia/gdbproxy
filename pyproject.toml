@@ -1,0 +1,17 @@
+[project]
+name = "gdbproxy"
+version = "0.1.0"
+description = "GDB Remote Serial Protocol proxy with packet dissection"
+readme = "README.md"
+authors = [
+    { name = "Duncan Ogilvie", email = "mr.exodia.tpodt@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+gdbproxy = "gdbproxy.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
