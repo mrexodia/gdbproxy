@@ -11,9 +11,11 @@ class Dissector:
     """Dissects GDB RSP packets into human-readable descriptions."""
 
     def __init__(self):
+        self._last_command: str | None = None  # Track last command for response context
         self._command_handlers: dict[str, Callable[[str], str]] = {
             "m": self._dissect_read_memory,
             "M": self._dissect_write_memory,
+            "x": self._dissect_read_memory_binary,
             "X": self._dissect_write_memory_binary,
             "g": self._dissect_read_registers,
             "G": self._dissect_write_registers,
@@ -79,8 +81,11 @@ class Dissector:
             return "Empty packet"
 
         if is_response:
-            return self._dissect_response(data)
+            result = self._dissect_response(data)
+            return result
         else:
+            # Track command for response context
+            self._last_command = data
             return self._dissect_command(data)
 
     def _dissect_command(self, data: str) -> str:
@@ -135,6 +140,8 @@ class Dissector:
             return self._dissect_console_output(data)
         elif data[0] == "F":
             return self._dissect_file_io_response(data)
+        elif data[0] == "b":
+            return self._dissect_binary_memory_response(data)
         elif data.startswith("QC"):
             # Current thread response
             return f"Current thread: {data[2:]}"
@@ -143,7 +150,10 @@ class Dissector:
             return self._dissect_vcont_response(data)
         elif all(c in "0123456789abcdefABCDEF" for c in data):
             return self._dissect_hex_data(data)
-        elif ":" in data or ";" in data:
+        elif self._is_rle_hex_data(data):
+            # RLE-encoded hex data (e.g., register values from 'g' command)
+            return self._dissect_rle_hex_data(data)
+        elif self._is_key_value_data(data):
             return self._dissect_key_value(data)
         else:
             return f"Response: {data}"
@@ -167,6 +177,13 @@ class Dissector:
             addr, length = match.groups()
             return f"Write {int(length, 16)} bytes to 0x{addr}"
         return f"Write memory: {data}"
+
+    def _dissect_read_memory_binary(self, data: str) -> str:
+        match = re.match(r"x([0-9a-fA-F]+),([0-9a-fA-F]+)", data)
+        if match:
+            addr, length = match.groups()
+            return f"Read {int(length, 16)} bytes (binary) from 0x{addr}"
+        return f"Read memory (binary): {data}"
 
     def _dissect_write_memory_binary(self, data: str) -> str:
         match = re.match(r"X([0-9a-fA-F]+),([0-9a-fA-F]+):", data)
@@ -571,9 +588,89 @@ class Dissector:
             sig_name = SIGNALS.get(sig, f"signal {sig}")
             extra = data[3:]
             if extra:
-                return f"Stopped: {sig_name} ({extra})"
+                details = self._parse_stop_reply_details(extra)
+                if details:
+                    return f"Stopped: {sig_name} ({details})"
             return f"Stopped: {sig_name}"
         return f"Stop reply: {data}"
+
+    def _parse_stop_reply_details(self, extra: str) -> str:
+        """Parse the key:value pairs in a T stop reply."""
+        # Common register numbers for x86-64
+        reg_names = {
+            "00": "rax", "01": "rbx", "02": "rcx", "03": "rdx",
+            "04": "rsi", "05": "rdi", "06": "rbp", "07": "rsp",
+            "08": "r8", "09": "r9", "0a": "r10", "0b": "r11",
+            "0c": "r12", "0d": "r13", "0e": "r14", "0f": "r15",
+            "10": "rip", "11": "eflags", "12": "cs", "13": "ss",
+            "14": "ds", "15": "es", "16": "fs", "17": "gs",
+        }
+
+        parts = []
+        thread_id = None
+        stop_reason = None
+
+        for item in extra.rstrip(";").split(";"):
+            if not item:
+                continue
+            if ":" not in item:
+                parts.append(item)
+                continue
+
+            key, value = item.split(":", 1)
+            key_lower = key.lower()
+
+            # Thread ID
+            if key_lower == "thread":
+                thread_id = value
+            # Stop reasons
+            elif key_lower == "watch":
+                stop_reason = f"write watchpoint at 0x{value}"
+            elif key_lower == "rwatch":
+                stop_reason = f"read watchpoint at 0x{value}"
+            elif key_lower == "awatch":
+                stop_reason = f"access watchpoint at 0x{value}"
+            elif key_lower == "swbreak":
+                stop_reason = "software breakpoint"
+            elif key_lower == "hwbreak":
+                stop_reason = "hardware breakpoint"
+            elif key_lower == "library":
+                stop_reason = "library event"
+            elif key_lower == "fork":
+                stop_reason = f"fork (child={value})"
+            elif key_lower == "vfork":
+                stop_reason = f"vfork (child={value})"
+            elif key_lower == "vforkdone":
+                stop_reason = "vfork done"
+            elif key_lower == "exec":
+                try:
+                    exec_name = bytes.fromhex(value).decode("utf-8", errors="replace")
+                    stop_reason = f"exec ({exec_name})"
+                except ValueError:
+                    stop_reason = f"exec ({value})"
+            elif key_lower == "create":
+                stop_reason = "thread created"
+            elif key_lower == "core":
+                parts.append(f"core {value}")
+            # Register values (numeric keys)
+            elif key_lower in reg_names:
+                # Don't include raw register values in summary - too verbose
+                pass
+            elif re.match(r"^[0-9a-f]{1,2}$", key_lower):
+                # Other numeric register - skip
+                pass
+            else:
+                parts.append(f"{key}={value}")
+
+        # Build result
+        result_parts = []
+        if stop_reason:
+            result_parts.append(stop_reason)
+        if thread_id:
+            result_parts.append(f"thread {thread_id}")
+        result_parts.extend(parts)
+
+        return ", ".join(result_parts) if result_parts else ""
 
     def _dissect_exit_reply(self, data: str) -> str:
         code = data[1:]
@@ -603,25 +700,70 @@ class Dissector:
     def _dissect_file_io(self, data: str) -> str:
         return f"File I/O request: {data[1:]}"
 
+    def _dissect_binary_memory_response(self, data: str) -> str:
+        """Dissect binary memory read response (b prefix)."""
+        # Response is 'b' followed by binary data (with escape sequences)
+        binary_data = data[1:]  # Skip 'b' prefix
+        # Count actual bytes (accounting for escape sequences)
+        byte_count = 0
+        i = 0
+        while i < len(binary_data):
+            if binary_data[i] == '}' and i + 1 < len(binary_data):
+                # Escaped byte: } followed by char XOR 0x20
+                byte_count += 1
+                i += 2
+            else:
+                byte_count += 1
+                i += 1
+        return f"Binary data: {byte_count} bytes"
+
     def _dissect_file_io_response(self, data: str) -> str:
-        """Dissect vFile response: F result[,errno][,data] or F-1,errno"""
+        """Dissect vFile response: F result[,errno][;data] or F-1,errno"""
         if data.startswith("F-1"):
-            parts = data.split(",")
+            parts = data[1:].split(",")
             if len(parts) >= 2:
-                errno = parts[1]
+                errno = parts[1].split(";")[0]  # errno before any data
                 return f"File error: errno {errno}"
             return "File error"
         elif data.startswith("F"):
-            parts = data[1:].split(",")
-            result = parts[0] if parts else "?"
+            # Format: F<result>[,errno][;data]
+            rest = data[1:]
+            # Split on ; first to separate result from data
+            if ";" in rest:
+                result_part, file_data = rest.split(";", 1)
+            else:
+                result_part = rest
+                file_data = None
+
+            # Parse result[,errno]
+            result_parts = result_part.split(",")
+            result = result_parts[0] if result_parts else "?"
+
             try:
                 result_int = int(result, 16)
-                if len(parts) > 1:
-                    return f"File result: {result_int} (with data)"
+                if file_data is not None:
+                    # Has data attached
+                    data_desc = self._describe_file_data(file_data, result_int)
+                    return f"File result: {result_int}{data_desc}"
                 return f"File result: {result_int}"
             except ValueError:
                 return f"File result: {result}"
         return f"File response: {data}"
+
+    def _describe_file_data(self, file_data: str, byte_count: int) -> str:
+        """Describe the data portion of a file I/O response."""
+        if not file_data:
+            return ""
+        # Check for PE header
+        if file_data.startswith("MZ"):
+            return " (PE header)"
+        # Check for ELF header
+        if file_data.startswith("\x7fELF") or file_data.startswith("\x7f" + "ELF"):
+            return " (ELF header)"
+        # Generic binary data
+        if byte_count > 0:
+            return f" ({byte_count} bytes)"
+        return ""
 
     def _dissect_qxfer_response(self, data: str, final: bool) -> str:
         """Dissect qXfer response data."""
@@ -669,12 +811,99 @@ class Dissector:
                 descriptions.append(act)
         return f"vCont supported: {', '.join(descriptions)}"
 
+    def _is_rle_hex_data(self, data: str) -> bool:
+        """Check if data looks like RLE-encoded hex (e.g., register dump).
+
+        RLE encoding uses * followed by a printable ASCII char as repeat count.
+        Pattern: hex digits interspersed with *<char> sequences.
+        """
+        if "*" not in data:
+            return False
+        # Check if it follows hex + RLE pattern
+        # Valid chars: hex digits, *, and any printable char after *
+        i = 0
+        while i < len(data):
+            c = data[i]
+            if c in "0123456789abcdefABCDEF":
+                i += 1
+            elif c == "*" and i + 1 < len(data):
+                # RLE: * followed by repeat count char (ASCII 32-126)
+                next_char = data[i + 1]
+                if 32 <= ord(next_char) <= 126:
+                    i += 2
+                else:
+                    return False
+            else:
+                return False
+        return True
+
+    def _dissect_rle_hex_data(self, data: str) -> str:
+        """Dissect RLE-encoded hex data (memory or register values)."""
+        # Calculate approximate decoded size
+        decoded_len = 0
+        i = 0
+        while i < len(data):
+            if i + 1 < len(data) and data[i + 1] == "*":
+                # This char is repeated
+                if i + 2 < len(data):
+                    repeat = ord(data[i + 2]) - 29  # RLE decode
+                    decoded_len += repeat
+                    i += 3
+                else:
+                    decoded_len += 1
+                    i += 1
+            elif data[i] == "*":
+                # Standalone * with repeat count
+                i += 2
+            else:
+                decoded_len += 1
+                i += 1
+
+        byte_count = decoded_len // 2
+
+        # Use command context to provide better label
+        if self._last_command:
+            cmd = self._last_command[0] if self._last_command else ""
+            if cmd == "g":
+                return f"Registers: {byte_count} bytes"
+            elif cmd in ("m", "x"):
+                return f"Memory: {byte_count} bytes"
+            elif cmd == "p":
+                return f"Register value: {byte_count} bytes"
+
+        return f"Data: {byte_count} bytes"
+
+    def _is_key_value_data(self, data: str) -> bool:
+        """Check if data looks like key=value or key:value pairs."""
+        if ":" not in data and ";" not in data:
+            return False
+        # If it has * characters, it's likely RLE data not key-value
+        if "*" in data:
+            return False
+        # Check for actual key:value or key=value patterns
+        # Key-value data typically has word characters before : or =
+        if re.search(r"\b\w+[:=]", data):
+            return True
+        return False
+
     def _dissect_hex_data(self, data: str) -> str:
         byte_count = len(data) // 2
+
+        # Use command context to provide better label
+        label = "Data"
+        if self._last_command:
+            cmd = self._last_command[0] if self._last_command else ""
+            if cmd == "g":
+                label = "Registers"
+            elif cmd in ("m", "x"):
+                label = "Memory"
+            elif cmd == "p":
+                label = "Register value"
+
         if byte_count <= 16:
             formatted = " ".join(data[i:i+2] for i in range(0, len(data), 2))
-            return f"Data: {formatted}"
-        return f"Data: {byte_count} bytes"
+            return f"{label}: {formatted}"
+        return f"{label}: {byte_count} bytes"
 
     def _dissect_key_value(self, data: str) -> str:
         pairs = []
