@@ -274,6 +274,10 @@ class ProxyServer:
         log_file = None
         if self.log_dir:
             self.log_dir.mkdir(parents=True, exist_ok=True)
+            # Create .gitignore to exclude log files from version control
+            gitignore_path = self.log_dir / ".gitignore"
+            if not gitignore_path.exists():
+                gitignore_path.write_text("*\n")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             log_path = self.log_dir / f"session_{session_id}_{timestamp}.log"
             log_file = open(log_path, "w")

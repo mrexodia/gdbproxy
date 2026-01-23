@@ -73,7 +73,8 @@ Examples:
         "-d", "--log-dir",
         metavar="DIR",
         type=Path,
-        help="Directory for session log files",
+        default=Path("gdbproxy_logs"),
+        help="Directory for session log files (default: gdbproxy_logs)",
     )
 
     parser.add_argument(
