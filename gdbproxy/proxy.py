@@ -197,11 +197,20 @@ class Session:
             self.logger.session_started(client_addr, (self.server_host, self.server_port))
             self._running = True
 
-            # Run both directions concurrently
-            await asyncio.gather(
-                self._forward_client_to_server(),
-                self._forward_server_to_client(),
-            )
+            # Run both directions - cancel remaining when first completes
+            tasks = [
+                asyncio.create_task(self._forward_client_to_server()),
+                asyncio.create_task(self._forward_server_to_client()),
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            # Cancel the other direction
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         except ConnectionRefusedError:
             self.logger.log_error(
                 f"Connection refused to {self.server_host}:{self.server_port}"
