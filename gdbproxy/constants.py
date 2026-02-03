@@ -89,11 +89,11 @@ STOP_REASONS = {
 }
 
 # Special characters
-PACKET_START = ord('$')
-PACKET_END = ord('#')
-NOTIFICATION_START = ord('%')
-ACK = ord('+')
-NACK = ord('-')
+PACKET_START = ord("$")
+PACKET_END = ord("#")
+NOTIFICATION_START = ord("%")
+ACK = ord("+")
+NACK = ord("-")
 INTERRUPT = 0x03
-ESCAPE = ord('}')
+ESCAPE = ord("}")
 ESCAPE_XOR = 0x20

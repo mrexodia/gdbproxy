@@ -17,9 +17,7 @@ def parse_host_port(value: str, name: str) -> tuple[str, int]:
         if not (1 <= port <= 65535):
             raise ValueError("Port out of range")
     except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"Invalid port number in {name}: {port_str}"
-        )
+        raise argparse.ArgumentTypeError(f"Invalid port number in {name}: {port_str}")
     return host or "localhost", port
 
 
@@ -29,7 +27,7 @@ def split_args(args: list[str] | None) -> tuple[list[str], list[str]]:
         args = sys.argv[1:]
     if "--" in args:
         idx = args.index("--")
-        return args[:idx], args[idx + 1:]
+        return args[:idx], args[idx + 1 :]
     return args, []
 
 
@@ -56,21 +54,24 @@ Examples:
     )
 
     parser.add_argument(
-        "-l", "--listen",
+        "-l",
+        "--listen",
         metavar="HOST:PORT",
         default="localhost:1234",
         help="Listen address (default: localhost:1234)",
     )
 
     parser.add_argument(
-        "-s", "--server",
+        "-s",
+        "--server",
         metavar="HOST:PORT",
         required=True,
         help="GDB server address (required)",
     )
 
     parser.add_argument(
-        "-d", "--log-dir",
+        "-d",
+        "--log-dir",
         metavar="DIR",
         type=Path,
         default=Path("gdbproxy_logs"),
@@ -78,7 +79,8 @@ Examples:
     )
 
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Show raw packet bytes",
     )

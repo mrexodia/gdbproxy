@@ -3,7 +3,7 @@
 import re
 from typing import Callable
 
-from .constants import BREAKPOINT_TYPES, SIGNALS, STOP_REASONS, VCONT_ACTIONS
+from .constants import BREAKPOINT_TYPES, SIGNALS, VCONT_ACTIONS
 from .packet import Packet, PacketType
 
 
@@ -283,7 +283,9 @@ class Dissector:
         if len(data) > 1:
             op = data[1]
             thread = data[2:]
-            op_name = "general ops" if op == "g" else "continue ops" if op == "c" else op
+            op_name = (
+                "general ops" if op == "g" else "continue ops" if op == "c" else op
+            )
             if thread == "-1" or thread == "0":
                 return f"Set thread for {op_name}: all threads"
             return f"Set thread for {op_name}: {thread}"
@@ -361,7 +363,9 @@ class Dissector:
             if len(open_parts) >= 1:
                 filename_hex = open_parts[0]
                 try:
-                    filename = bytes.fromhex(filename_hex).decode("utf-8", errors="replace")
+                    filename = bytes.fromhex(filename_hex).decode(
+                        "utf-8", errors="replace"
+                    )
                 except ValueError:
                     filename = filename_hex
                 flags = open_parts[1] if len(open_parts) > 1 else "?"
@@ -408,7 +412,9 @@ class Dissector:
             mkdir_parts = args.split(",")
             if mkdir_parts:
                 try:
-                    dirname = bytes.fromhex(mkdir_parts[0]).decode("utf-8", errors="replace")
+                    dirname = bytes.fromhex(mkdir_parts[0]).decode(
+                        "utf-8", errors="replace"
+                    )
                 except ValueError:
                     dirname = mkdir_parts[0]
                 return f"Create directory: {dirname}"
@@ -498,7 +504,9 @@ class Dissector:
         return "Query supported features"
 
     def _dissect_qxfer(self, data: str) -> str:
-        match = re.match(r"qXfer:([^:]+):read:([^:]*):([0-9a-fA-F]+),([0-9a-fA-F]+)", data)
+        match = re.match(
+            r"qXfer:([^:]+):read:([^:]*):([0-9a-fA-F]+),([0-9a-fA-F]+)", data
+        )
         if match:
             obj, annex, offset, length = match.groups()
             obj_desc = {
@@ -598,12 +606,30 @@ class Dissector:
         """Parse the key:value pairs in a T stop reply."""
         # Common register numbers for x86-64
         reg_names = {
-            "00": "rax", "01": "rbx", "02": "rcx", "03": "rdx",
-            "04": "rsi", "05": "rdi", "06": "rbp", "07": "rsp",
-            "08": "r8", "09": "r9", "0a": "r10", "0b": "r11",
-            "0c": "r12", "0d": "r13", "0e": "r14", "0f": "r15",
-            "10": "rip", "11": "eflags", "12": "cs", "13": "ss",
-            "14": "ds", "15": "es", "16": "fs", "17": "gs",
+            "00": "rax",
+            "01": "rbx",
+            "02": "rcx",
+            "03": "rdx",
+            "04": "rsi",
+            "05": "rdi",
+            "06": "rbp",
+            "07": "rsp",
+            "08": "r8",
+            "09": "r9",
+            "0a": "r10",
+            "0b": "r11",
+            "0c": "r12",
+            "0d": "r13",
+            "0e": "r14",
+            "0f": "r15",
+            "10": "rip",
+            "11": "eflags",
+            "12": "cs",
+            "13": "ss",
+            "14": "ds",
+            "15": "es",
+            "16": "fs",
+            "17": "gs",
         }
 
         parts = []
@@ -708,7 +734,7 @@ class Dissector:
         byte_count = 0
         i = 0
         while i < len(binary_data):
-            if binary_data[i] == '}' and i + 1 < len(binary_data):
+            if binary_data[i] == "}" and i + 1 < len(binary_data):
                 # Escaped byte: } followed by char XOR 0x20
                 byte_count += 1
                 i += 2
@@ -901,7 +927,7 @@ class Dissector:
                 label = "Register value"
 
         if byte_count <= 16:
-            formatted = " ".join(data[i:i+2] for i in range(0, len(data), 2))
+            formatted = " ".join(data[i : i + 2] for i in range(0, len(data), 2))
             return f"{label}: {formatted}"
         return f"{label}: {byte_count} bytes"
 

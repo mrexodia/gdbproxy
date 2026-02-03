@@ -1,7 +1,6 @@
 """Async TCP proxy and session management for GDB RSP."""
 
 import asyncio
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import TextIO
@@ -31,9 +30,9 @@ class Logger:
             "reset": "\033[0m",
             "client": "\033[36m",  # Cyan
             "server": "\033[33m",  # Yellow
-            "info": "\033[32m",    # Green
-            "error": "\033[31m",   # Red
-            "dim": "\033[2m",      # Dim
+            "info": "\033[32m",  # Green
+            "error": "\033[31m",  # Red
+            "dim": "\033[2m",  # Dim
         }
 
     def _color(self, name: str) -> str:
@@ -49,11 +48,14 @@ class Logger:
         if self.log_file:
             # Strip ANSI codes for log file
             import re
+
             clean = re.sub(r"\033\[[0-9;]*m", "", line)
             self.log_file.write(clean + "\n")
             self.log_file.flush()
 
-    def session_started(self, client_addr: tuple[str, int], server_addr: tuple[str, int]):
+    def session_started(
+        self, client_addr: tuple[str, int], server_addr: tuple[str, int]
+    ):
         ts = self._timestamp()
         info = self._color("info")
         reset = self._color("reset")
@@ -194,7 +196,9 @@ class Session:
             self.server_reader, self.server_writer = await asyncio.open_connection(
                 self.server_host, self.server_port
             )
-            self.logger.session_started(client_addr, (self.server_host, self.server_port))
+            self.logger.session_started(
+                client_addr, (self.server_host, self.server_port)
+            )
             self._running = True
 
             # Run both directions - cancel remaining when first completes
@@ -202,7 +206,9 @@ class Session:
                 asyncio.create_task(self._forward_client_to_server()),
                 asyncio.create_task(self._forward_server_to_client()),
             ]
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
 
             # Cancel the other direction
             for task in pending:
@@ -401,10 +407,13 @@ async def run_subprocess(command: list[str], use_color: bool = True) -> int:
             text = line.decode("utf-8", errors="replace").rstrip()
             print(f"{color('cmd')}[{prefix}]{color('reset')} {text}", flush=True)
 
-    await asyncio.gather(
-        forward_stream(process.stdout, "out"),
-        forward_stream(process.stderr, "err"),
-    )
+    tasks = []
+    if process.stdout:
+        tasks.append(forward_stream(process.stdout, "out"))
+    if process.stderr:
+        tasks.append(forward_stream(process.stderr, "err"))
+    if tasks:
+        await asyncio.gather(*tasks)
 
     return await process.wait()
 
@@ -415,9 +424,7 @@ async def run_with_subprocess(
 ) -> int:
     """Run proxy server alongside a subprocess."""
     # Start the subprocess
-    subprocess_task = asyncio.create_task(
-        run_subprocess(command, server.use_color)
-    )
+    subprocess_task = asyncio.create_task(run_subprocess(command, server.use_color))
 
     # Start the proxy server
     server_task = asyncio.create_task(server.start())
