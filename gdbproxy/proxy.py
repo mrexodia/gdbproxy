@@ -68,6 +68,57 @@ class Logger:
         reset = self._color("reset")
         self._write(f"{ts} {info}Session {self.session_id} ended{reset}")
 
+    def _is_hex_or_rle_data(self, data: str) -> bool:
+        """Check if data looks like hex or RLE-encoded hex (memory data)."""
+        if not data:
+            return False
+        # RLE encoding uses * followed by a printable ASCII char as repeat count
+        # Valid chars: hex digits, *, and any printable char after *
+        i = 0
+        while i < len(data):
+            c = data[i]
+            if c in "0123456789abcdefABCDEF":
+                i += 1
+            elif c == "*" and i + 1 < len(data):
+                # RLE: * followed by repeat count char (ASCII 32-126)
+                next_char = data[i + 1]
+                if 32 <= ord(next_char) <= 126:
+                    i += 2
+                else:
+                    return False
+            else:
+                return False
+        return True
+
+    def _should_truncate_data(self, packet: Packet, from_client: bool) -> bool:
+        """Check if packet data should be truncated (vfile/memory operations)."""
+        data = packet.data_str
+        if not data:
+            return False
+
+        if from_client:
+            # Client commands: memory reads (m, x) or vFile operations
+            if data and data[0] in ("m", "x"):
+                return True
+            if data.startswith("vFile:"):
+                return True
+        else:
+            # Server responses: hex/RLE data (memory read responses) or file I/O responses
+            # Check for hex or RLE-encoded responses (memory read results)
+            if len(data) > 64 and self._is_hex_or_rle_data(data):
+                return True
+            # File I/O responses with data (F<result>;data)
+            if data.startswith("F") and ";" in data and len(data) > 64:
+                return True
+        return False
+
+    def _truncate_raw(self, raw: bytes, max_len: int = 80) -> str:
+        """Truncate raw packet display with ellipsis."""
+        decoded = raw.decode("latin-1")
+        if len(decoded) <= max_len:
+            return decoded
+        return decoded[:max_len] + "..."
+
     def log_packet(
         self,
         packet: Packet,
@@ -84,8 +135,11 @@ class Logger:
             direction = "-->"
             color = self._color("server")
 
-        # Format the raw packet for display
-        raw_display = packet.raw.decode("latin-1")
+        # Format the raw packet for display (truncate data-heavy packets unless verbose)
+        if not self.verbose and self._should_truncate_data(packet, from_client):
+            raw_display = self._truncate_raw(packet.raw)
+        else:
+            raw_display = packet.raw.decode("latin-1")
 
         # Get dissection
         is_response = not from_client
@@ -279,7 +333,7 @@ class ProxyServer:
             if not gitignore_path.exists():
                 gitignore_path.write_text("*\n")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_path = self.log_dir / f"session_{session_id}_{timestamp}.log"
+            log_path = self.log_dir / f"{timestamp}_session_{session_id}.log"
             log_file = open(log_path, "w")
 
         try:
