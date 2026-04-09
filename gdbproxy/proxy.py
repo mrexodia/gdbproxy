@@ -137,26 +137,33 @@ class Logger:
             direction = "-->"
             color = self._color("server")
 
-        # Format the raw packet for display (truncate data-heavy packets unless verbose)
-        if not self.verbose and self._should_truncate_data(packet, from_client):
-            raw_display = self._truncate_raw(packet.raw)
-        else:
-            raw_display = packet.raw.decode("latin-1")
+        try:
+            # Format the raw packet for display (truncate data-heavy packets unless verbose)
+            if not self.verbose and self._should_truncate_data(packet, from_client):
+                raw_display = self._truncate_raw(packet.raw)
+            else:
+                raw_display = packet.raw.decode("latin-1", errors="replace")
 
-        # Get dissection
-        is_response = not from_client
-        dissection = self.dissector.dissect(packet, is_response=is_response)
+            # Get dissection
+            is_response = not from_client
+            dissection = self.dissector.dissect(packet, is_response=is_response)
+            if packet.type in (PacketType.PACKET, PacketType.NOTIFICATION) and not packet.valid_checksum:
+                dissection += " [invalid checksum]"
 
-        # Log the packet
-        self._write(f"{ts}   {color}{direction}{reset} {raw_display}")
-        self._write(f"           {dim}{dissection}{reset}")
+            # Log the packet
+            self._write(f"{ts}   {color}{direction}{reset} {raw_display}")
+            self._write(f"           {dim}{dissection}{reset}")
 
-        # Verbose mode: show raw bytes
-        if self.verbose and packet.type == PacketType.PACKET:
-            hex_bytes = packet.data.hex()
-            if len(hex_bytes) > 64:
-                hex_bytes = hex_bytes[:64] + "..."
-            self._write(f"           {dim}Raw: {hex_bytes}{reset}")
+            # Verbose mode: show raw bytes
+            if self.verbose and packet.type in (PacketType.PACKET, PacketType.NOTIFICATION):
+                hex_bytes = packet.data.hex()
+                if len(hex_bytes) > 64:
+                    hex_bytes = hex_bytes[:64] + "..."
+                self._write(f"           {dim}Raw: {hex_bytes}{reset}")
+        except Exception as e:
+            raw_display = packet.raw.decode("latin-1", errors="replace")
+            self._write(f"{ts}   {color}{direction}{reset} {raw_display}")
+            self._write(f"           {dim}Dissection error: {e}{reset}")
 
     def log_error(self, message: str):
         ts = self._timestamp()

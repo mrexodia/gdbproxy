@@ -38,6 +38,7 @@ class Dissector:
         self._v_handlers: dict[str, Callable[[str], str]] = {
             "vCont": self._dissect_vcont,
             "vCont?": self._dissect_vcont_query,
+            "vCtrlC": self._dissect_vctrlc,
             "vKill": self._dissect_vkill,
             "vRun": self._dissect_vrun,
             "vAttach": self._dissect_vattach,
@@ -77,16 +78,16 @@ class Dissector:
             return self._dissect_notification(packet.data_str)
 
         data = packet.data_str
+
+        if is_response:
+            return self._dissect_response(data)
+
         if not data:
             return "Empty packet"
 
-        if is_response:
-            result = self._dissect_response(data)
-            return result
-        else:
-            # Track command for response context
-            self._last_command = data
-            return self._dissect_command(data)
+        # Track command for response context
+        self._last_command = data
+        return self._dissect_command(data)
 
     def _dissect_command(self, data: str) -> str:
         """Dissect a command packet from client."""
@@ -108,60 +109,67 @@ class Dissector:
 
     def _dissect_response(self, data: str) -> str:
         """Dissect a response packet from server."""
-        if not data:
-            return "Empty response"
+        last_command = self._last_command or ""
 
+        if data == "":
+            return "Empty response (command not supported)"
         if data == "OK":
             return "OK"
-        elif data == "":
-            return "Empty response (command not supported)"
-        elif data == "l":
+        if data == "l":
             return "End of list"
-        elif data.startswith("l") and len(data) > 1:
-            # qXfer final response: l<data>
+        if last_command.startswith(("qfThreadInfo", "qsThreadInfo")) and data.startswith(
+            "m"
+        ):
+            return self._dissect_thread_id_response(data[1:])
+        if last_command.startswith("qXfer") and data.startswith("l") and len(data) > 1:
             return self._dissect_qxfer_response(data[1:], final=True)
-        elif data.startswith("m") and len(data) > 1:
-            # Could be qXfer partial response or thread list
-            rest = data[1:]
-            # Check if it looks like a thread ID (mp01.01 format)
-            if re.match(r"^p?[0-9a-fA-F]+(\.[0-9a-fA-F]+)?$", rest):
-                return self._dissect_thread_id_response(rest)
-            # Otherwise it's likely qXfer partial data
-            return self._dissect_qxfer_response(rest, final=False)
-        elif data.startswith("E"):
+        if last_command.startswith("qXfer") and data.startswith("m") and len(data) > 1:
+            return self._dissect_qxfer_response(data[1:], final=False)
+        if data.startswith("E"):
             return self._dissect_error(data)
-        elif data[0] in ("S", "T"):
+        if data[0] in ("S", "T"):
             return self._dissect_stop_reply(data)
-        elif data[0] == "W":
+        if data[0] == "W":
             return self._dissect_exit_reply(data)
-        elif data[0] == "X":
+        if data[0] == "X":
             return self._dissect_terminate_reply(data)
-        elif data[0] == "O":
+        if data[0] == "w":
+            return self._dissect_thread_exit_reply(data)
+        if data[0] == "N":
+            return "No resumed threads left"
+        if data[0] == "O":
             return self._dissect_console_output(data)
-        elif data[0] == "F":
+        if data[0] == "F":
             return self._dissect_file_io_response(data)
-        elif data[0] == "b":
+        if data[0] == "b":
             return self._dissect_binary_memory_response(data)
-        elif data.startswith("QC"):
-            # Current thread response
+        if data.startswith("QC"):
             return f"Current thread: {data[2:]}"
-        elif data.startswith("vCont"):
-            # vCont? response listing supported actions
+        if data.startswith("vCont"):
             return self._dissect_vcont_response(data)
-        elif all(c in "0123456789abcdefABCDEF" for c in data):
-            return self._dissect_hex_data(data)
-        elif self._is_rle_hex_data(data):
-            # RLE-encoded hex data (e.g., register values from 'g' command)
+        if last_command.startswith("qAttached") and data in ("0", "1"):
+            return (
+                "Attached to existing process"
+                if data == "1"
+                else "Created a new process"
+            )
+        if self._is_hex_or_unavailable_data(data):
+            return self._dissect_hex_or_unavailable_data(data)
+        if self._is_rle_hex_data(data):
             return self._dissect_rle_hex_data(data)
-        elif self._is_key_value_data(data):
+        if self._is_key_value_data(data):
             return self._dissect_key_value(data)
-        else:
-            return f"Response: {data}"
+        if data.startswith("l") and len(data) > 1:
+            return self._dissect_qxfer_response(data[1:], final=True)
+        if data.startswith("m") and len(data) > 1:
+            return self._dissect_qxfer_response(data[1:], final=False)
+        return f"Response: {data}"
 
     def _dissect_notification(self, data: str) -> str:
         """Dissect an asynchronous notification."""
         if data.startswith("Stop:"):
-            return f"Async stop notification: {data[5:]}"
+            reply = data[5:]
+            return f"Async stop notification: {self._dissect_response(reply)}"
         return f"Notification: {data}"
 
     def _dissect_read_memory(self, data: str) -> str:
@@ -325,6 +333,9 @@ class Dissector:
 
     def _dissect_vcont_query(self, data: str) -> str:
         return "Query vCont support"
+
+    def _dissect_vctrlc(self, data: str) -> str:
+        return "Interrupt remote target (non-stop mode)"
 
     def _dissect_vkill(self, data: str) -> str:
         pid = data[6:] if len(data) > 6 else ""
@@ -634,7 +645,7 @@ class Dissector:
 
         parts = []
         thread_id = None
-        stop_reason = None
+        stop_reasons = []
 
         for item in extra.rstrip(";").split(";"):
             if not item:
@@ -651,31 +662,39 @@ class Dissector:
                 thread_id = value
             # Stop reasons
             elif key_lower == "watch":
-                stop_reason = f"write watchpoint at 0x{value}"
+                stop_reasons.append(f"write watchpoint at 0x{value}")
             elif key_lower == "rwatch":
-                stop_reason = f"read watchpoint at 0x{value}"
+                stop_reasons.append(f"read watchpoint at 0x{value}")
             elif key_lower == "awatch":
-                stop_reason = f"access watchpoint at 0x{value}"
+                stop_reasons.append(f"access watchpoint at 0x{value}")
             elif key_lower == "swbreak":
-                stop_reason = "software breakpoint"
+                stop_reasons.append("software breakpoint")
             elif key_lower == "hwbreak":
-                stop_reason = "hardware breakpoint"
+                stop_reasons.append("hardware breakpoint")
             elif key_lower == "library":
-                stop_reason = "library event"
+                stop_reasons.append("library event")
             elif key_lower == "fork":
-                stop_reason = f"fork (child={value})"
+                stop_reasons.append(f"fork (child={value})")
             elif key_lower == "vfork":
-                stop_reason = f"vfork (child={value})"
+                stop_reasons.append(f"vfork (child={value})")
             elif key_lower == "vforkdone":
-                stop_reason = "vfork done"
+                stop_reasons.append("vfork done")
+            elif key_lower == "clone":
+                stop_reasons.append(f"thread clone (child={value})")
+            elif key_lower == "syscall_entry":
+                stop_reasons.append(f"syscall entry {value}")
+            elif key_lower == "syscall_return":
+                stop_reasons.append(f"syscall return {value}")
+            elif key_lower == "replaylog":
+                stop_reasons.append(f"replay log {value}")
             elif key_lower == "exec":
                 try:
                     exec_name = bytes.fromhex(value).decode("utf-8", errors="replace")
-                    stop_reason = f"exec ({exec_name})"
+                    stop_reasons.append(f"exec ({exec_name})")
                 except ValueError:
-                    stop_reason = f"exec ({value})"
+                    stop_reasons.append(f"exec ({value})")
             elif key_lower == "create":
-                stop_reason = "thread created"
+                stop_reasons.append("thread created")
             elif key_lower == "core":
                 parts.append(f"core {value}")
             # Register values (numeric keys)
@@ -690,8 +709,7 @@ class Dissector:
 
         # Build result
         result_parts = []
-        if stop_reason:
-            result_parts.append(stop_reason)
+        result_parts.extend(stop_reasons)
         if thread_id:
             result_parts.append(f"thread {thread_id}")
         result_parts.extend(parts)
@@ -699,21 +717,32 @@ class Dissector:
         return ", ".join(result_parts) if result_parts else ""
 
     def _dissect_exit_reply(self, data: str) -> str:
-        code = data[1:]
-        try:
+        match = re.match(r"W([0-9a-fA-F]+)(?:;process:([0-9a-fA-F]+))?$", data)
+        if match:
+            code, pid = match.groups()
             code_num = int(code, 16)
+            if pid is not None:
+                return f"Process {pid} exited with code {code_num}"
             return f"Process exited with code {code_num}"
-        except ValueError:
-            return f"Process exited: {data}"
+        return f"Process exited: {data}"
 
     def _dissect_terminate_reply(self, data: str) -> str:
-        sig = data[1:3] if len(data) >= 3 else data[1:]
-        try:
+        match = re.match(r"X([0-9a-fA-F]+)(?:;process:([0-9a-fA-F]+))?$", data)
+        if match:
+            sig, pid = match.groups()
             sig_num = int(sig, 16)
             sig_name = SIGNALS.get(sig_num, f"signal {sig_num}")
+            if pid is not None:
+                return f"Process {pid} terminated by {sig_name}"
             return f"Process terminated by {sig_name}"
-        except ValueError:
-            return f"Process terminated: {data}"
+        return f"Process terminated: {data}"
+
+    def _dissect_thread_exit_reply(self, data: str) -> str:
+        match = re.match(r"w([0-9a-fA-F]+);(.+)$", data)
+        if match:
+            code, tid = match.groups()
+            return f"Thread {tid} exited with code {int(code, 16)}"
+        return f"Thread exited: {data}"
 
     def _dissect_console_output(self, data: str) -> str:
         output_hex = data[1:]
@@ -806,7 +835,6 @@ class Dissector:
 
     def _dissect_thread_id_response(self, data: str) -> str:
         """Dissect thread ID in response (e.g., from qfThreadInfo)."""
-        # Handle comma-separated list of threads
         if "," in data:
             threads = data.split(",")
             return f"Threads: {', '.join(threads)}"
@@ -865,39 +893,22 @@ class Dissector:
 
     def _dissect_rle_hex_data(self, data: str) -> str:
         """Dissect RLE-encoded hex data (memory or register values)."""
-        # Calculate approximate decoded size
         decoded_len = 0
         i = 0
         while i < len(data):
-            if i + 1 < len(data) and data[i + 1] == "*":
-                # This char is repeated
-                if i + 2 < len(data):
-                    repeat = ord(data[i + 2]) - 29  # RLE decode
-                    decoded_len += repeat
-                    i += 3
-                else:
-                    decoded_len += 1
-                    i += 1
+            if i + 1 < len(data) and data[i + 1] == "*" and i + 2 < len(data):
+                repeat = ord(data[i + 2]) - 29
+                decoded_len += 1 + repeat
+                i += 3
             elif data[i] == "*":
-                # Standalone * with repeat count
                 i += 2
             else:
                 decoded_len += 1
                 i += 1
 
         byte_count = decoded_len // 2
-
-        # Use command context to provide better label
-        if self._last_command:
-            cmd = self._last_command[0] if self._last_command else ""
-            if cmd == "g":
-                return f"Registers: {byte_count} bytes"
-            elif cmd in ("m", "x"):
-                return f"Memory: {byte_count} bytes"
-            elif cmd == "p":
-                return f"Register value: {byte_count} bytes"
-
-        return f"Data: {byte_count} bytes"
+        label = self._data_label()
+        return f"{label}: {byte_count} bytes"
 
     def _is_key_value_data(self, data: str) -> bool:
         """Check if data looks like key=value or key:value pairs."""
@@ -914,17 +925,7 @@ class Dissector:
 
     def _dissect_hex_data(self, data: str) -> str:
         byte_count = len(data) // 2
-
-        # Use command context to provide better label
-        label = "Data"
-        if self._last_command:
-            cmd = self._last_command[0] if self._last_command else ""
-            if cmd == "g":
-                label = "Registers"
-            elif cmd in ("m", "x"):
-                label = "Memory"
-            elif cmd == "p":
-                label = "Register value"
+        label = self._data_label()
 
         if byte_count <= 16:
             formatted = " ".join(data[i : i + 2] for i in range(0, len(data), 2))
@@ -942,3 +943,33 @@ class Dissector:
             else:
                 pairs.append(item)
         return f"Features: {', '.join(pairs)}"
+
+    def _is_hex_or_unavailable_data(self, data: str) -> bool:
+        return bool(data) and len(data) % 2 == 0 and all(
+            c in "0123456789abcdefABCDEFxX" for c in data
+        )
+
+    def _dissect_hex_or_unavailable_data(self, data: str) -> str:
+        if any(c in "xX" for c in data):
+            byte_count = len(data) // 2
+            unavailable_bytes = sum(
+                1 for i in range(0, len(data), 2) if data[i : i + 2].lower() == "xx"
+            )
+            label = self._data_label()
+            return (
+                f"{label}: {byte_count} bytes "
+                f"({unavailable_bytes} unavailable)"
+            )
+        return self._dissect_hex_data(data)
+
+    def _data_label(self) -> str:
+        label = "Data"
+        if self._last_command:
+            cmd = self._last_command[0]
+            if cmd == "g":
+                label = "Registers"
+            elif cmd in ("m", "x"):
+                label = "Memory"
+            elif cmd == "p":
+                label = "Register value"
+        return label
