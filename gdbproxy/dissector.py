@@ -153,6 +153,8 @@ class Dissector:
                 if data == "1"
                 else "Created a new process"
             )
+        if last_command.startswith("qOffsets"):
+            return f"Section offsets: {data}"
         if self._is_hex_or_unavailable_data(data):
             return self._dissect_hex_or_unavailable_data(data)
         if self._is_rle_hex_data(data):
